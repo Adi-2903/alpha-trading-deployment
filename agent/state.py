@@ -24,7 +24,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "agent_state.json"
+import os
+STATE_PATH = Path("/tmp/agent_state.json") if os.environ.get("VERCEL") else Path(__file__).resolve().parent.parent / "agent_state.json"
 MAX_DECISION_LOG = 200
 MAX_EQUITY_CURVE = 5000
 TRADING_PERIODS_PER_YEAR = 252
