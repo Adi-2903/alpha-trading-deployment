@@ -1,0 +1,66 @@
+name: Agent Cycle Cron (Free Jugaad)
+
+on:
+  schedule:
+    # Every 15 min, Mon–Fri, 14:00–20:45 UTC (NYSE market hours: 14:30–21:00 UTC)
+    # GitHub Actions minimum frequency is 5 min; we use 15 to match the agent's default interval.
+    - cron: "0,15,30,45 14-20 * * 1-5"
+  workflow_dispatch: # Also allows manual one-off trigger from the GitHub Actions UI
+
+jobs:
+  trigger-agent-cycle:
+    name: Trigger Agent Cycle on Vercel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger /cron/run on Vercel deployment
+        run: |
+          echo "Triggering agent cycle at $(date -u)"
+          STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X GET "${{ secrets.VERCEL_AGENT_URL }}/cron/run" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --max-time 120)
+
+          echo "--- HTTP Status: $STATUS ---"
+          echo "--- Agent Response ---"
+
+          # Pretty-print the key fields from the agent result
+          python3 -c "
+          import sys, json
+          try:
+              d = json.load(open('/tmp/response.json'))
+              direction = d.get('direction', '?').upper().replace('_', ' ')
+              edge      = d.get('composite_edge') or 0
+              regime    = d.get('regime_label', '?')
+              kelly     = (d.get('kelly_fraction') or 0) * 100
+              spot      = d.get('spot') or 0
+              fvol      = (d.get('forecast_vol') or 0) * 100
+              iv        = (d.get('live_atm_iv') or 0) * 100
+              orders    = d.get('planned_orders', [])
+              notes     = d.get('notes', [])
+              print(f'Symbol   : {d.get(\"symbol\",\"?\")}   Spot \${spot:.2f}')
+              print(f'Regime   : {regime}   Forecast {fvol:.1f}%   Live IV {iv:.1f}%')
+              print(f'Direction: {direction}   Edge {edge:+.4f}   Kelly {kelly:+.2f}%')
+              print(f'Orders   : {len(orders)} planned')
+              for o in orders[:3]:
+                  tag = \"SUBMITTED\" if o.get(\"submitted\") else \"DRY-RUN\"
+                  print(f'  [{tag}] {o.get(\"description\",\"\")}')
+              for n in notes[:2]:
+                  print(f'  NOTE: {n[:100]}')
+          except Exception as e:
+              print(f'Could not parse response: {e}')
+              print(open('/tmp/response.json').read()[:500])
+          " || cat /tmp/response.json
+
+          # Fail the workflow step if HTTP status is not 200
+          [ "$STATUS" = "200" ] || { echo "Agent cycle returned HTTP $STATUS — check Vercel logs"; exit 1; }
+
+      - name: Upload response artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-cycle-response-${{ github.run_id }}
+          path: /tmp/response.json
+          retention-days: 7

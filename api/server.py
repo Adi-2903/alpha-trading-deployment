@@ -10,11 +10,14 @@ Run with:  uvicorn api.server:app --reload --port 8000
 from __future__ import annotations
 
 import datetime as dt
+import os
+import pathlib
 from dataclasses import asdict
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from agent.loop import run_cycle
@@ -194,6 +197,45 @@ def root():
         "service": "alpaca-vol-agent", "docs": "/docs",
         "endpoints": [
             "/health", "/status", "/chain", "/positions", "/decisions", "/metrics",
+            "/dashboard", "/cron/run",
             "POST /run", "POST /backtest",
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — serve the static trading UI HTML
+# ---------------------------------------------------------------------------
+_DASHBOARD_PATH = pathlib.Path(__file__).resolve().parent.parent / "dashboard.html"
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=True,
+         summary="Trading Dashboard", tags=["UI"])
+def dashboard():
+    """Serves dashboard.html — the live trading UI.
+    Accessible at https://<your-vercel-url>/dashboard"""
+    if not _DASHBOARD_PATH.exists():
+        raise HTTPException(status_code=404, detail="dashboard.html not found")
+    return HTMLResponse(content=_DASHBOARD_PATH.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Cron endpoint — called by Vercel Cron Jobs OR GitHub Actions on schedule
+# ---------------------------------------------------------------------------
+@app.get("/cron/run", summary="Scheduled Agent Cycle", tags=["Cron"])
+def cron_run(authorization: Optional[str] = Header(default=None)):
+    """Runs one agent cycle. Called by Vercel Cron (vercel.json) or the
+    GitHub Actions workflow (.github/workflows/agent_cron.yml) every 15 min
+    during NYSE market hours.
+
+    Protected by CRON_SECRET env var: callers must send
+    'Authorization: Bearer <CRON_SECRET>' header. If CRON_SECRET is not set
+    in the environment the check is skipped (useful for local testing)."""
+    cron_secret = os.getenv("CRON_SECRET", "")
+    if cron_secret and authorization != f"Bearer {cron_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized — set CRON_SECRET env var")
+    try:
+        result = run_cycle(SETTINGS)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)

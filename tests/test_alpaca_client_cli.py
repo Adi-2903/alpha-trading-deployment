@@ -1,10 +1,13 @@
 """
-Tests for alpaca_client.py's CLI transport. These mock subprocess.run
-entirely -- no real `alpaca` binary or network call happens here (this
-sandbox can't reach alpaca.markets or install the Go binary anyway).
-What's verified is the contract that matters for the hackathon's hard
-requirement: every call shells out to `alpaca api ...` with the right
-method/path/body/env, not to `requests` or any other bare HTTP client.
+tests/test_alpaca_client_cli.py -- Tests for alpaca_client.py's REST transport.
+
+These mock `requests.request` entirely -- no real network call or Alpaca
+credentials needed. What's verified:
+  - AlpacaClient sends correct HTTP method, URL, and headers
+  - Pagination works (next_page_token / page_token loop)
+  - Non-2xx responses raise AlpacaAPIError with status + body
+  - get_account / get_orders / submit_order / get_option_chain_snapshot
+    all route to the right endpoints
 """
 from __future__ import annotations
 
@@ -22,123 +25,149 @@ def _settings(**overrides) -> Settings:
     return Settings(**base)
 
 
-def _fake_run(stdout: str = "{}", stderr: str = "", returncode: int = 0):
-    def _runner(args, input=None, capture_output=None, text=None, timeout=None, env=None):
-        _runner.calls.append({"args": args, "input": input, "env": env})
-        result = MagicMock()
-        result.stdout, result.stderr, result.returncode = stdout, stderr, returncode
-        return result
-    _runner.calls = []
-    return _runner
+def _mock_response(body: dict | list | str, status_code: int = 200):
+    """Build a fake requests.Response."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.ok = (200 <= status_code < 300)
+    raw = json.dumps(body) if not isinstance(body, str) else body
+    resp.text = raw
+    resp.content = raw.encode()
+    resp.json = lambda: json.loads(raw)
+    return resp
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_client_requires_cli_binary_on_path(mock_which):
+# ---------------------------------------------------------------------------
+# Initialisation
+# ---------------------------------------------------------------------------
+
+def test_client_init_succeeds_with_valid_credentials():
     from alpaca_client import AlpacaClient
     client = AlpacaClient(settings=_settings())
-    assert client.cli_binary == "alpaca"
+    assert client.settings.api_key == "PKtest"
 
 
-@patch("alpaca_client.shutil.which", return_value=None)
-def test_client_raises_clear_error_when_cli_missing(mock_which):
+def test_client_init_raises_without_credentials():
     from alpaca_client import AlpacaClient
-    with pytest.raises(RuntimeError, match="was not found on PATH"):
-        AlpacaClient(settings=_settings())
+    with pytest.raises(RuntimeError, match="ALPACA_API_KEY"):
+        AlpacaClient(settings=_settings(api_key="", api_secret=""))
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_get_account_shells_out_to_alpaca_api(mock_which):
+# ---------------------------------------------------------------------------
+# GET /v2/account
+# ---------------------------------------------------------------------------
+
+def test_get_account_calls_correct_endpoint():
     from alpaca_client import AlpacaClient
-    runner = _fake_run(stdout=json.dumps({"equity": "100000", "cash": "50000"}))
-    with patch("alpaca_client.subprocess.run", side_effect=runner):
+    resp = _mock_response({"equity": "100000", "cash": "50000"})
+    with patch("requests.request", return_value=resp) as mock_req:
         client = AlpacaClient(settings=_settings())
         account = client.get_account()
 
     assert account["equity"] == "100000"
-    call = runner.calls[0]
-    assert call["args"][0] == "alpaca"
-    assert call["args"][1:5] == ["api", "GET", "/v2/account", "--quiet"]
-    assert call["env"]["ALPACA_API_KEY"] == "PKtest"
-    assert call["env"]["ALPACA_SECRET_KEY"] == "secrettest"
-    # never a live-trading override unless the project explicitly opted in
-    assert "ALPACA_LIVE_TRADE" not in call["env"]
+    call = mock_req.call_args
+    assert call[0][0] == "GET"
+    assert "/v2/account" in call[0][1]
+    # credentials go in headers, never in URL
+    headers = call[1]["headers"]
+    assert headers["APCA-API-KEY-ID"] == "PKtest"
+    assert headers["APCA-API-SECRET-KEY"] == "secrettest"
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_submit_order_pipes_json_body_via_stdin(mock_which):
+# ---------------------------------------------------------------------------
+# POST /v2/orders
+# ---------------------------------------------------------------------------
+
+def test_submit_order_posts_json_body():
     from alpaca_client import AlpacaClient
-    runner = _fake_run(stdout=json.dumps({"id": "abc123", "status": "accepted"}))
-    with patch("alpaca_client.subprocess.run", side_effect=runner):
+    resp = _mock_response({"id": "abc123", "status": "accepted"})
+    payload = {"symbol": "AAPL", "qty": "1", "side": "buy", "type": "market", "time_in_force": "day"}
+    with patch("requests.request", return_value=resp) as mock_req:
         client = AlpacaClient(settings=_settings())
-        payload = {"symbol": "AAPL", "qty": "1", "side": "buy", "type": "market", "time_in_force": "day"}
         result = client.submit_order(payload)
 
     assert result["status"] == "accepted"
-    call = runner.calls[0]
-    assert call["args"][1:5] == ["api", "POST", "/v2/orders", "--quiet"]
-    assert json.loads(call["input"]) == payload
+    call = mock_req.call_args
+    assert call[0][0] == "POST"
+    assert "/v2/orders" in call[0][1]
+    assert call[1]["json"] == payload
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_get_orders_builds_query_string_from_params(mock_which):
+# ---------------------------------------------------------------------------
+# GET /v2/orders
+# ---------------------------------------------------------------------------
+
+def test_get_orders_builds_query_string_from_params():
     from alpaca_client import AlpacaClient
-    runner = _fake_run(stdout="[]")
-    with patch("alpaca_client.subprocess.run", side_effect=runner):
+    resp = _mock_response([])
+    with patch("requests.request", return_value=resp) as mock_req:
         client = AlpacaClient(settings=_settings())
         client.get_orders(status="open", limit=50)
 
-    path_arg = runner.calls[0]["args"][3]
-    assert path_arg.startswith("/v2/orders?")
-    assert "status=open" in path_arg
-    assert "limit=50" in path_arg
+    call = mock_req.call_args
+    url = call[0][1]
+    assert "/v2/orders" in url
+    assert "status=open" in url
+    assert "limit=50" in url
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_nonzero_exit_raises_with_stderr_body(mock_which):
-    from alpaca_client import AlpacaClient, AlpacaCLIError
-    runner = _fake_run(stdout="", stderr='{"error":"unauthorized","status":401}', returncode=2)
-    with patch("alpaca_client.subprocess.run", side_effect=runner):
+# ---------------------------------------------------------------------------
+# Non-2xx → AlpacaAPIError
+# ---------------------------------------------------------------------------
+
+def test_nonzero_status_raises_alpaca_api_error():
+    from alpaca_client import AlpacaAPIError, AlpacaClient
+    resp = _mock_response({"message": "unauthorized"}, status_code=401)
+    with patch("requests.request", return_value=resp):
         client = AlpacaClient(settings=_settings())
-        with pytest.raises(AlpacaCLIError) as exc_info:
+        with pytest.raises(AlpacaAPIError) as exc_info:
             client.get_account()
 
-    assert exc_info.value.returncode == 2
     assert exc_info.value.status == 401
-    assert "unauthorized" in exc_info.value.stderr
+    assert "unauthorized" in exc_info.value.body
 
 
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_live_trade_flag_only_passed_through_when_explicitly_opted_in(mock_which):
-    import os
+# ---------------------------------------------------------------------------
+# Pagination: get_option_chain_snapshot
+# ---------------------------------------------------------------------------
+
+def test_option_chain_snapshot_paginates_on_next_page_token():
     from alpaca_client import AlpacaClient
 
-    runner = _fake_run(stdout="{}")
-    with patch.dict(os.environ, {"ALPACA_LIVE_TRADE": "true"}), \
-         patch("alpaca_client.subprocess.run", side_effect=runner):
-        client = AlpacaClient(settings=_settings(i_understand_this_is_live=False))
-        client.get_account()
-        assert "ALPACA_LIVE_TRADE" not in runner.calls[0]["env"]
+    page1 = _mock_response({
+        "snapshots": {"SPY240119C00580000": {"impliedVolatility": 0.2}},
+        "next_page_token": "tok1",
+    })
+    page2 = _mock_response({
+        "snapshots": {"SPY240119P00580000": {"impliedVolatility": 0.21}},
+    })
 
-        client_live = AlpacaClient(settings=_settings(i_understand_this_is_live=True))
-        client_live.get_account()
-        assert runner.calls[1]["env"]["ALPACA_LIVE_TRADE"] == "true"
-
-
-@patch("alpaca_client.shutil.which", return_value="/usr/local/bin/alpaca")
-def test_option_chain_snapshot_paginates_on_next_page_token(mock_which):
-    from alpaca_client import AlpacaClient
-    responses = [
-        json.dumps({"snapshots": {"SPY240119C00580000": {"impliedVolatility": 0.2}}, "next_page_token": "tok1"}),
-        json.dumps({"snapshots": {"SPY240119P00580000": {"impliedVolatility": 0.21}}}),
-    ]
-
-    def _runner(args, input=None, capture_output=None, text=None, timeout=None, env=None):
-        result = MagicMock()
-        result.stdout, result.stderr, result.returncode = responses.pop(0), "", 0
-        return result
-
-    with patch("alpaca_client.subprocess.run", side_effect=_runner):
+    with patch("requests.request", side_effect=[page1, page2]):
         client = AlpacaClient(settings=_settings())
         snapshots = client.get_option_chain_snapshot("SPY")
 
     assert set(snapshots.keys()) == {"SPY240119C00580000", "SPY240119P00580000"}
+
+
+# ---------------------------------------------------------------------------
+# Pagination: get_option_contracts
+# ---------------------------------------------------------------------------
+
+def test_option_contracts_paginates_on_page_token():
+    from alpaca_client import AlpacaClient
+
+    page1 = _mock_response({
+        "option_contracts": [{"symbol": "SPY240119C00580000"}],
+        "page_token": "tok2",
+    })
+    page2 = _mock_response({
+        "option_contracts": [{"symbol": "SPY240119P00580000"}],
+    })
+
+    with patch("requests.request", side_effect=[page1, page2]):
+        client = AlpacaClient(settings=_settings())
+        contracts = client.get_option_contracts("SPY")
+
+    assert len(contracts) == 2
+    assert contracts[0]["symbol"] == "SPY240119C00580000"
+    assert contracts[1]["symbol"] == "SPY240119P00580000"

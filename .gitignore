@@ -1,4 +1,4 @@
-﻿# Secrets — NEVER commit
+# Secrets — NEVER commit
 .env
 
 # Python
@@ -40,3 +40,6 @@ ALPACA-VOL-AGENT/
 # Logs
 *.log
 logs/
+
+# Vercel
+.vercel/
