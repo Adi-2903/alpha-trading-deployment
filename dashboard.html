@@ -478,7 +478,7 @@ footer a{color:var(--dim)}
 </div>
 
 <script>
-const API = 'http://localhost:8000';
+const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 'http://localhost:8000' : window.location.origin;
 const $ = id => document.getElementById(id);
 let chainData = [];
 let chainFilter = 'all';
