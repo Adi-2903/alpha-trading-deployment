@@ -425,7 +425,7 @@ footer a{color:var(--dim)}
 </div>
 
 <script>
-const API = 'http://localhost:8000';
+const API = ''; // empty = relative paths, works on Vercel AND localhost (via 'python cli.py serve')
 const $ = id => document.getElementById(id);
 let chainData = [];
 let chainFilter = 'all';
