@@ -1,4 +1,5 @@
 name: Agent Cycle Cron (Free Jugaad)
+# re-register: force GitHub Actions to index this workflow
 
 on:
   schedule:
