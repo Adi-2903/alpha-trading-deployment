@@ -149,6 +149,7 @@ def backtest(req: BacktestRequest = BacktestRequest()):
     try:
         summary = _run_backtest(
             req.symbol or SETTINGS.symbol, years=req.years, initial_capital=req.capital, cost_bps=req.cost_bps,
+            out_dir="/tmp/backtest_out",  # Vercel filesystem is read-only; /tmp is the only writable path
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
