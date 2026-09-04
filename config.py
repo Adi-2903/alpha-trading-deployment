@@ -59,6 +59,15 @@ def _int(name: str, default: int) -> int:
     return int(val) if val not in (None, "") else default
 
 
+DEFAULT_WATCHLIST = "NVDA,AAPL,TSLA,MSFT,AMZN,GOOGL,META,NFLX,AVGO,AMD,BRK.B,JPM,V,LLY,WMT,COST"
+
+
+def _list(name: str, default: str) -> list[str]:
+    val = os.getenv(name)
+    raw = val if val not in (None, "") else default
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
 @dataclass(frozen=True)
 class RiskLimits:
     """Portfolio-overlay risk budget. All fractions are of current
@@ -72,6 +81,10 @@ class RiskLimits:
     kelly_fraction: float = field(default_factory=lambda: _float("KELLY_FRACTION", 0.25))
     kelly_clip: float = field(default_factory=lambda: _float("KELLY_CLIP", 0.15))
     max_contracts_per_leg: int = field(default_factory=lambda: _int("MAX_CONTRACTS_PER_LEG", 20))
+    # -- auto-exit thresholds (v2) --
+    exit_take_profit_pct: float = field(default_factory=lambda: _float("EXIT_TAKE_PROFIT_PCT", 0.50))
+    exit_stop_loss_pct: float = field(default_factory=lambda: _float("EXIT_STOP_LOSS_PCT", 0.35))
+    exit_dte_close_days: int = field(default_factory=lambda: _int("EXIT_DTE_CLOSE_DAYS", 1))
 
 
 @dataclass(frozen=True)
@@ -98,6 +111,7 @@ class Settings:
 
     # -- what to trade --
     symbol: str = field(default_factory=lambda: os.getenv("SYMBOL", "SPY"))
+    watchlist: list = field(default_factory=lambda: _list("WATCHLIST", DEFAULT_WATCHLIST))
     target_dte_days: int = field(default_factory=lambda: _int("TARGET_DTE_DAYS", 7))
     dte_tolerance_days: int = field(default_factory=lambda: _int("DTE_TOLERANCE_DAYS", 3))
     short_leg_target_delta: float = field(default_factory=lambda: _float("SHORT_LEG_TARGET_DELTA", 0.16))
@@ -122,6 +136,7 @@ class Settings:
     enable_heston_cross_check: bool = field(default_factory=lambda: _bool("ENABLE_HESTON_CROSS_CHECK", True))
     enable_toxicity_gate: bool = field(default_factory=lambda: _bool("ENABLE_TOXICITY_GATE", True))
     enable_cost_floor: bool = field(default_factory=lambda: _bool("ENABLE_COST_FLOOR", True))
+    enable_auto_exit: bool = field(default_factory=lambda: _bool("ENABLE_AUTO_EXIT", True))
 
     # -- risk --
     risk: RiskLimits = field(default_factory=RiskLimits)

@@ -23,9 +23,12 @@ normal book.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
+
+log = logging.getLogger("alpaca_vol_agent.order_manager")
 
 from alpaca_client import AlpacaClient
 from config import Settings
@@ -127,8 +130,63 @@ def plan_equity_hedge(symbol: str, trade_shares: float) -> Optional[PlannedOrder
     )
 
 
+def plan_position_close(
+    symbol: str, qty: float, reason: str, pnl_pct: float = 0.0, dte: int = 0,
+) -> Optional[PlannedOrder]:
+    """Close an existing option position by selling (long) or buying to close (short).
+    `reason` is one of 'take_profit', 'stop_loss', 'near_expiry'.
+    `qty` is signed: positive for long positions (sell to close),
+    negative for short positions (buy to close)."""
+    if abs(qty) < 1:
+        return None
+    abs_qty = int(round(abs(qty)))
+    # Long positions: sell to close. Short positions: buy to close.
+    side = "sell" if qty > 0 else "buy"
+    intent = "sell_to_close" if qty > 0 else "buy_to_close"
+    pnl_str = f"{pnl_pct:+.1%}" if pnl_pct else ""
+    reason_label = reason.replace("_", " ").upper()
+    payload = {
+        "symbol": symbol,
+        "qty": str(abs_qty),
+        "side": side,
+        "type": "market",
+        "time_in_force": "day",
+        "position_intent": intent,
+        "client_order_id": f"volagent-exit-{uuid.uuid4().hex[:12]}",
+    }
+    return PlannedOrder(
+        kind=f"exit_{reason}",
+        payloads=[payload],
+        description=(
+            f"[{reason_label}] {side.upper()} {abs_qty}x {symbol} to close "
+            f"(P&L {pnl_str}, {dte} DTE)."
+        ),
+    )
+
+
 def submit_orders(client: AlpacaClient, plan: PlannedOrder, settings: Settings) -> dict[str, Any]:
     if settings.dry_run:
         return {"submitted": False, "dry_run": True, "would_submit": plan.payloads, "description": plan.description}
     results = [client.submit_order(p) for p in plan.payloads]
     return {"submitted": True, "dry_run": False, "orders": results, "description": plan.description}
+
+
+def submit_close_position(client: AlpacaClient, symbol: str, settings: Settings, reason: str) -> dict[str, Any]:
+    """Close a position via DELETE /v2/positions/{symbol}. If Alpaca rejects
+    with 403 'no available quote' (illiquid / expired option), the position
+    is already effectively worthless -- we record it as skipped rather than
+    crashing the whole cycle. dry_run gate still applies."""
+    if settings.dry_run:
+        return {"submitted": False, "dry_run": True, "close_symbol": symbol, "reason": reason}
+    try:
+        result = client.close_position(symbol)
+        return {"submitted": True, "dry_run": False, "close_result": result, "reason": reason}
+    except Exception as exc:
+        err_str = str(exc)
+        # 403 'no available quote' means the option has no bid -- it is
+        # effectively worthless (expired or deeply OTM). Log and skip.
+        if "40310000" in err_str or "no available quote" in err_str:
+            log.warning("close_position %s: no quote (likely worthless) -- skipping close: %s", symbol, exc)
+            return {"submitted": False, "dry_run": False, "skipped": True,
+                    "reason": reason, "skip_reason": "no_quote_worthless"}
+        raise

@@ -83,7 +83,7 @@ class BacktestSummary:
 
 def run_backtest(
     symbol: str, years: float = 3.0, initial_capital: float = 1_000_000.0,
-    risk: RiskLimits | None = None, roll_freq_days: int = 7, out_dir: str = "/tmp/backtest_out",
+    risk: RiskLimits | None = None, roll_freq_days: int = 7, out_dir: str = "backtest/out",
     cost_bps: float = 5.0, option_cost_multiple: float = 3.0,
 ) -> BacktestSummary:
     """cost_bps: proportional transaction cost, applied to BOTH the daily
