@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from agent.loop import run_cycle
+from agent.multi_loop import run_multi_cycle
 from agent.state import compute_risk_metrics, load_state
 from alpaca_client import AlpacaClient
 from config import SETTINGS, Settings
@@ -192,6 +193,38 @@ def run(req: RunRequest = RunRequest()):
     return asdict(result)
 
 
+class RunAllRequest(BaseModel):
+    symbols: Optional[list[str]] = None
+    dry_run: Optional[bool] = None
+
+
+@app.post("/run-all")
+def run_all(req: RunAllRequest = RunAllRequest()):
+    """Runs agent cycle across watchlist symbols using agent/multi_loop.py."""
+    settings = SETTINGS
+    if req.dry_run is not None:
+        settings = Settings(
+            api_key=SETTINGS.api_key, api_secret=SETTINGS.api_secret,
+            data_feed=SETTINGS.data_feed, stock_feed=SETTINGS.stock_feed,
+            symbol=SETTINGS.symbol, watchlist=SETTINGS.watchlist,
+            target_dte_days=SETTINGS.target_dte_days, dte_tolerance_days=SETTINGS.dte_tolerance_days,
+            short_leg_target_delta=SETTINGS.short_leg_target_delta, wing_target_delta=SETTINGS.wing_target_delta,
+            dry_run=req.dry_run,
+            i_understand_this_is_live=SETTINGS.i_understand_this_is_live,
+            enable_credit_spreads=SETTINGS.enable_credit_spreads, enable_equity_hedge=SETTINGS.enable_equity_hedge,
+            min_open_interest=SETTINGS.min_open_interest, risk=SETTINGS.risk, hedge=SETTINGS.hedge,
+            enable_heston_cross_check=SETTINGS.enable_heston_cross_check,
+            enable_toxicity_gate=SETTINGS.enable_toxicity_gate,
+            enable_cost_floor=SETTINGS.enable_cost_floor,
+            enable_auto_exit=SETTINGS.enable_auto_exit,
+        )
+    try:
+        multi_res = run_multi_cycle(settings, symbols=req.symbols)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(multi_res)
+
+
 @app.get("/")
 def root():
     return {
@@ -199,7 +232,7 @@ def root():
         "endpoints": [
             "/health", "/status", "/chain", "/positions", "/decisions", "/metrics",
             "/dashboard", "/cron/run",
-            "POST /run", "POST /backtest",
+            "POST /run", "POST /run-all", "POST /backtest",
         ],
     }
 
